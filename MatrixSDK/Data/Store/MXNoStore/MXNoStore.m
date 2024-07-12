@@ -124,6 +124,17 @@
     return NO;
 }
 
+- (BOOL)removeAllMessagesSentBefore:(uint64_t)limitTs inRoom:(nonnull NSString *)roomId
+{
+    // Only the last message is stored
+    MXEvent *lastMessage = lastMessages[roomId];
+    if (!lastMessage.isState && lastMessage.originServerTs < limitTs) {
+        lastMessages[roomId] = nil;
+        return YES;
+    }
+    return NO;
+}
+
 - (MXEvent *)eventWithEventId:(NSString *)eventId inRoom:(NSString *)roomId
 {
     // Events are not stored. So, we cannot find it.
@@ -411,6 +422,23 @@
     return nil;
 }
 
+- (void)getEventReceipts:(nonnull NSString *)roomId eventId:(nonnull NSString *)eventId threadId:(nonnull NSString *)threadId sorted:(BOOL)sort completion:(nonnull void (^)(NSArray<MXReceiptData *> * _Nonnull))completion {
+    if (completion)
+    {
+        completion(@[]);
+    }
+}
+
+
+- (nullable MXReceiptData *)getReceiptInRoom:(nonnull NSString *)roomId threadId:(nonnull NSString *)threadId forUserId:(nonnull NSString *)userId {
+    return nil;
+}
+
+
+- (nonnull NSDictionary<NSString *,MXReceiptData *> *)getReceiptsInRoom:(nonnull NSString *)roomId forUserId:(nonnull NSString *)userId {
+    return @{};
+}
+
 - (void)loadReceiptsForRoom:(NSString *)roomId completion:(void (^)(void))completion
 {
     if (completion)
@@ -424,6 +452,11 @@
 - (NSUInteger)localUnreadEventCount:(NSString *)roomId threadId:(NSString *)threadId withTypeIn:(NSArray *)types
 {
     return 0;
+}
+
+- (NSDictionary<NSString *,NSNumber *> *)localUnreadEventCountPerThread:(NSString *)roomId withTypeIn:(NSArray *)types
+{
+    return @{};
 }
 
 - (NSArray<MXEvent *> *)newIncomingEventsInRoom:(NSString *)roomId threadId:(NSString *)threadId withTypeIn:(NSArray<MXEventTypeString> *)types
@@ -462,6 +495,19 @@
 
 - (void)storeMaxUploadSize:(NSInteger)maxUploadSize
 {
+}
+
+- (void)setUnreadForRoom:(nonnull NSString *)roomId
+{
+}
+
+- (void)resetUnreadForRoom:(nonnull NSString *)roomId
+{
+}
+
+- (BOOL)isRoomMarkedAsUnread:(nonnull NSString*)roomId
+{
+    return NO;
 }
 
 - (void)close

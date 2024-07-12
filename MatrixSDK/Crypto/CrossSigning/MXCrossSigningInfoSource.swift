@@ -16,8 +16,6 @@
 
 import Foundation
 
-#if DEBUG && os(iOS)
-
 /// Convenience struct which transforms `MatrixSDKCrypto` cross signing info formats
 /// into `MatrixSDK` `MXCrossSigningInfo` formats.
 struct MXCrossSigningInfoSource {
@@ -39,14 +37,4 @@ struct MXCrossSigningInfoSource {
             )
         )
     }
-    
-    func crossSigningInfo(userIds: [String]) -> [String: MXCrossSigningInfo] {
-        return userIds
-            .compactMap(crossSigningInfo(userId:))
-            .reduce(into: [String: MXCrossSigningInfo] ()) { dict, info in
-                return dict[info.userId] = info
-            }
-    }
 }
-
-#endif

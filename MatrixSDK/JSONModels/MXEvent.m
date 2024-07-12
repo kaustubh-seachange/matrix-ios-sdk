@@ -115,6 +115,7 @@ NSString *const kMXMessageTypeVideo                  = @"m.video";
 NSString *const kMXMessageTypeLocation               = @"m.location";
 NSString *const kMXMessageTypeFile                   = @"m.file";
 NSString *const kMXMessageTypeServerNotice           = @"m.server_notice";
+NSString *const kMXEventTypeStringRoomRetention      = @"m.room.retention";
 NSString *const kMXMessageTypeKeyVerificationRequest = @"m.key.verification.request";
 
 NSString *const kMXMessageBodyKey                    = @"body";
@@ -128,6 +129,8 @@ NSString *const kMXMessageContentKeyNewContent       = @"m.new_content";
 //  TODO: Replace when the MSC merged
 //  https://github.com/matrix-org/matrix-doc/pull/3440
 NSString *const MXEventRelationTypeThread            = @"m.thread";
+
+NSString *const kMXToDeviceMessageId                 = @"org.matrix.msgid";
 
 NSString *const kMXEventLocalEventIdPrefix           = @"kMXEventLocalId_";
 
@@ -204,6 +207,11 @@ NSString *const kMXJoinRulesContentKeyAllow = @"allow";
 NSString *const kMXJoinRulesContentKeyType = @"type";
 NSString *const kMXJoinRulesContentKeyRoomId = @"room_id";
 
+// Threads support
+
+NSString *const kMXEventTimelineMain = @"main";
+NSString *const kMXEventUnthreaded = @"unthreaded";
+
 #pragma mark - MXEvent
 @interface MXEvent ()
 {
@@ -226,12 +234,10 @@ NSString *const kMXJoinRulesContentKeyRoomId = @"room_id";
      See `forwardingCurve25519KeyChain` property.
      */
     NSArray<NSString *> *forwardingCurve25519KeyChain;
-
-    /**
-     Untrusted flag for clear events.
-     */
-    BOOL untrusted;
 }
+
+@property (nonatomic, strong, readwrite) MXEventDecryptionDecoration *decryptionDecoration;
+
 @end
 
 @implementation MXEvent
@@ -247,7 +253,7 @@ NSString *const kMXJoinRulesContentKeyRoomId = @"room_id";
     if (self)
     {
         _ageLocalTs = -1;
-        untrusted = NO;
+        _decryptionDecoration = nil;
     }
 
     return self;
@@ -567,6 +573,42 @@ NSString *const kMXJoinRulesContentKeyRoomId = @"room_id";
             if (readDict)
             {
                 [list addObject:eventId];
+            }
+        }
+    }
+    
+    return list;
+}
+
+- (NSArray *)readReceiptThreadIds
+{
+    NSMutableArray* list = nil;
+    
+    if (_wireEventType == MXEventTypeReceipt)
+    {
+        NSArray* eventIds = [_wireContent allKeys];
+        list = [[NSMutableArray alloc] initWithCapacity:eventIds.count];
+        
+        for (NSString* eventId in eventIds)
+        {
+            NSDictionary* eventDict = [_wireContent objectForKey:eventId];
+            NSDictionary* readDict = [eventDict objectForKey:kMXEventTypeStringRead];
+            
+            if (readDict)
+            {
+                NSArray<NSDictionary *>* userDicts = [readDict allValues];
+                
+                NSString *threadId;
+                for (NSDictionary *userDict in userDicts)
+                {
+                    threadId = userDict[@"thread_id"];
+                    if (threadId)
+                    {
+                        break;
+                    }
+                }
+                
+                [list addObject:threadId ?: kMXEventUnthreaded];
             }
         }
     }
@@ -1030,7 +1072,7 @@ NSString *const kMXJoinRulesContentKeyRoomId = @"room_id";
         _clearEvent->senderCurve25519Key = decryptionResult.senderCurve25519Key;
         _clearEvent->claimedEd25519Key = decryptionResult.claimedEd25519Key;
         _clearEvent->forwardingCurve25519KeyChain = decryptionResult.forwardingCurve25519KeyChain ? decryptionResult.forwardingCurve25519KeyChain : @[];
-        _clearEvent->untrusted = decryptionResult.isUntrusted;
+        _clearEvent.decryptionDecoration = decryptionResult.decoration;
     }
 
     // Notify only for events that are lately decrypted
@@ -1139,7 +1181,6 @@ NSString *const kMXJoinRulesContentKeyRoomId = @"room_id";
     return encryptedContentFiles;
 }
 
-// Extract the decryption result that allowed to decrypt the event.
 - (MXEventDecryptionResult*)decryptionResult
 {
     MXEventDecryptionResult *decryptionResult = [MXEventDecryptionResult new];
@@ -1150,7 +1191,7 @@ NSString *const kMXJoinRulesContentKeyRoomId = @"room_id";
         decryptionResult.senderCurve25519Key = _clearEvent->senderCurve25519Key;
         decryptionResult.claimedEd25519Key = _clearEvent->claimedEd25519Key;
         decryptionResult.forwardingCurve25519KeyChain = _clearEvent->forwardingCurve25519KeyChain;
-        decryptionResult.untrusted = _clearEvent.isUntrusted;
+        decryptionResult.decoration = _clearEvent.decryptionDecoration;
     }
     
     decryptionResult.error = _decryptionError;
@@ -1158,13 +1199,13 @@ NSString *const kMXJoinRulesContentKeyRoomId = @"room_id";
     return decryptionResult;
 }
 
-- (BOOL)isUntrusted
+- (MXEventDecryptionDecoration *)decryptionDecoration
 {
     if (self.isEncrypted && _clearEvent)
     {
-        return _clearEvent.isUntrusted;
+        return _clearEvent.decryptionDecoration;
     }
-    return untrusted;
+    return _decryptionDecoration;
 }
 
 #pragma mark - private

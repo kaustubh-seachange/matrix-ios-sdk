@@ -204,8 +204,10 @@ public class MXSpaceNotificationCounter: NSObject {
             }
         } else if roomInfo.membership == .invite {
             if roomInfo.isDirect {
+                notificationState.directMissedDiscussionsCount += 1
                 notificationState.directMissedDiscussionsHighlightedCount += 1
             } else {
+                notificationState.groupMissedDiscussionsCount += 1
                 notificationState.groupMissedDiscussionsHighlightedCount += 1
             }
         }
@@ -223,6 +225,12 @@ public class MXSpaceNotificationCounter: NSObject {
                 continue
             }
             
+            // Support for MSC3987: The dont_notify push rule action is deprecated.
+            if rule.actions.isEmpty {
+                return rule.enabled
+            }
+
+            // Compatibility support.
             for ruleAction in ruleActions where ruleAction.actionType == MXPushRuleActionTypeDontNotify {
                 return rule.enabled
             }

@@ -120,23 +120,31 @@
     {
         [store stateOfRoom:roomId success:^(NSArray<MXEvent *> * _Nonnull stateEvents) {
             if (!stateEvents.count) {
-                MXLogWarning(@"[MXRoomState] loadRoomStateFromStore(%@): No state events stored, loading from api", logId);
+                MXLogWarning(@"[MXRoomState] loadRoomStateFromStore(%@): No state events stored, loading from API", logId);
                 
-                [matrixSession.matrixRestClient stateOfRoom:roomId success:^(NSArray *JSONData) {
-                    NSArray<MXEvent *> *events = [MXEvent modelsFromJSON:JSONData];
-                    MXLogDebug(@"[MXRoomState] loadRoomStateFromStore(%@): Loaded %lu events from api", logId, events.count);
-                    
-                    [roomState handleStateEvents:events];
+                if (!matrixSession)
+                {
+                    MXLogError(@"[MXRoomState] loadRoomStateFromStore: Missing session, unable to load from API")
                     onComplete(roomState);
-                } failure:^(NSError *error) {
-                    NSDictionary *details = @{
-                        @"log_id": logId ?: @"unknown",
-                        @"error": error ?: @"unknown"
-                    };
-                    MXLogErrorDetails(@"[MXRoomState] loadRoomStateFromStore: Failed to load any events from api", details);
-                    
-                    onComplete(roomState);
-                }];
+                }
+                else
+                {
+                    [matrixSession.matrixRestClient stateOfRoom:roomId success:^(NSArray *JSONData) {
+                        NSArray<MXEvent *> *events = [MXEvent modelsFromJSON:JSONData];
+                        MXLogDebug(@"[MXRoomState] loadRoomStateFromStore(%@): Loaded %lu events from api", logId, events.count);
+                        
+                        [roomState handleStateEvents:events];
+                        onComplete(roomState);
+                    } failure:^(NSError *error) {
+                        NSDictionary *details = @{
+                            @"log_id": logId ?: @"unknown",
+                            @"error": error ?: @"unknown"
+                        };
+                        MXLogErrorDetails(@"[MXRoomState] loadRoomStateFromStore: Failed to load any events from API", details);
+                        
+                        onComplete(roomState);
+                    }];
+                }
             } else {
                 MXLogDebug(@"[MXRoomState] loadRoomStateFromStore(%@): Initializing with %lu state events", logId, stateEvents.count);
                 
@@ -154,6 +162,7 @@
     if (self)
     {
         _isLive = NO;
+        _members = [[MXRoomMembers alloc] initWithMembers:_members isLive:NO];
 
         // At the beginning of pagination, the back room state must be the same
         // as the current current room state.

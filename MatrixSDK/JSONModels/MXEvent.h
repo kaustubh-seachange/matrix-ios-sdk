@@ -24,6 +24,7 @@
 @class MXEventDecryptionResult;
 @class MXEncryptedContentFile;
 @class MXEventContentLocation;
+@class MXEventDecryptionDecoration;
 
 MX_ASSUME_MISSING_NULLABILITY_BEGIN
 
@@ -102,6 +103,7 @@ typedef NS_ENUM(NSInteger, MXEventType)
     MXEventTypeSpaceOrder,
     MXEventTypeBeaconInfo,
     MXEventTypeBeacon,
+    MXEventTypeRoomRetention,
 
     // The event is a custom event. Refer to its `MXEventTypeString` version
     MXEventTypeCustom = 1000
@@ -162,6 +164,7 @@ FOUNDATION_EXPORT NSString *const kMXEventTypeStringSpaceChild;
 FOUNDATION_EXPORT NSString *const kMXEventTypeStringSpaceOrder;
 FOUNDATION_EXPORT NSString *const kMXEventTypeStringSpaceOrderMSC3230;
 FOUNDATION_EXPORT NSString *const kMXEventTypeStringSpaceOrderKey;
+FOUNDATION_EXPORT NSString *const kMXEventTypeStringRoomRetention;
 
 // Interactive key verification
 FOUNDATION_EXPORT NSString *const kMXEventTypeStringKeyVerificationRequest;
@@ -229,6 +232,11 @@ FOUNDATION_EXPORT NSString *const MXEventRelationTypeReference;     // Reply
 FOUNDATION_EXPORT NSString *const MXEventRelationTypeReplace;       // Edition
 FOUNDATION_EXPORT NSString *const kMXMessageContentKeyNewContent;   // Edited content key
 FOUNDATION_EXPORT NSString *const MXEventRelationTypeThread;        // Thread
+
+/**
+ To-device messages
+ */
+FOUNDATION_EXPORT NSString *const kMXToDeviceMessageId;
 
 /**
  Prefix used for id of temporary local event.
@@ -303,6 +311,11 @@ FOUNDATION_EXPORT NSString *const kMXMessageContentKeyExtensibleAssetTypePin;
 FOUNDATION_EXPORT NSString *const kMXJoinRulesContentKeyAllow;
 FOUNDATION_EXPORT NSString *const kMXJoinRulesContentKeyType;
 FOUNDATION_EXPORT NSString *const kMXJoinRulesContentKeyRoomId;
+
+// Threads support
+
+FOUNDATION_EXPORT NSString *const kMXEventTimelineMain;
+FOUNDATION_EXPORT NSString *const kMXEventUnthreaded;
 
 /**
  The internal event state used to handle the different steps of the event sending.
@@ -510,7 +523,7 @@ extern NSString *const kMXEventIdentifierKey;
 /**
  If the event relates to another one, some data about the relation.
  */
-@property (nonatomic) MXEventContentRelatesTo *relatesTo;
+@property (nonatomic, nullable) MXEventContentRelatesTo *relatesTo;
 
 /**
  In case of sending failure (MXEventSentStateFailed), the error that occured.
@@ -580,6 +593,13 @@ extern NSString *const kMXEventIdentifierKey;
 - (NSArray *)readReceiptEventIds;
 
 /**
+ Returns the thread IDs for which a read receipt is defined in this event.
+ 
+ This property is relevant only for events with 'kMXEventTypeStringReceipt' type.
+ */
+- (NSArray *)readReceiptThreadIds;
+
+/**
  Returns the fully-qualified IDs of the users who sent read receipts with this event.
  
  This property is relevant only for events with 'kMXEventTypeStringReceipt' type.
@@ -645,7 +665,7 @@ extern NSString *const kMXEventIdentifierKey;
  Thread id for the event. This is actually the eventId of the thread's root event.
  nil if the event is not in a thread.
  */
-@property (nonatomic, readonly) NSString *threadId;
+@property (nonatomic, readonly, nullable) NSString *threadId;
 
 #pragma mark - Crypto
 
@@ -669,12 +689,6 @@ extern NSString *const kMXEventIdentifierKey;
  This is a small MXEvent instance with typically value for `type` and 'content' fields.
  */
 @property (nonatomic, readonly) MXEvent *clearEvent;
-
-/**
- Flag indicating the event was decrypted with an untrusted key.
- If the event cannot be decrypted yet or the event not encrypted at all, this flag would be NO.
- */
-@property (nonatomic, readonly, getter=isUntrusted) BOOL untrusted;
 
 /**
  The curve25519 key for the device that we think sent this event.
@@ -727,6 +741,16 @@ extern NSString *const kMXEventIdentifierKey;
  @return base64-encoded curve25519 keys, from oldest to newest.
  */
 @property (nonatomic, readonly) NSArray<NSString *> *forwardingCurve25519KeyChain;
+
+/**
+ Extract the decryption result that allowed to decrypt the event
+ */
+@property (nonatomic, strong, readonly) MXEventDecryptionResult *decryptionResult;
+
+/**
+ Decoration representing the authenticity of the decrypted message
+ */
+@property (nonatomic, strong, readonly) MXEventDecryptionDecoration *decryptionDecoration;
 
 /**
  If any, the error that occured during decryption.

@@ -121,7 +121,7 @@ typedef void (^MXOnResumeDone)(void);
      */
     NSMutableArray *globalEventListeners;
 
-    /** 
+    /**
      The block to call when MSSession resume is complete.
      */
     MXOnResumeDone onResumeDone;
@@ -215,6 +215,10 @@ typedef void (^MXOnResumeDone)(void);
 
 @property (nonatomic, readonly) MXStoreService *storeService;
 
+@property (nonatomic, readwrite) MXClientInformationService *clientInformationService;
+
+@property (nonatomic, strong) MXSessionStartupProgress *startupProgress;
+
 @end
 
 @implementation MXSession
@@ -227,7 +231,7 @@ typedef void (^MXOnResumeDone)(void);
     {
         matrixRestClient = mxRestClient;
         _threePidAddManager = [[MX3PidAddManager alloc] initWithMatrixSession:self];
-        mediaManager = [[MXMediaManager alloc] initWithHomeServer:matrixRestClient.homeserver];
+        mediaManager = [[MXMediaManager alloc] initWithRestClient:matrixRestClient];
         rooms = [NSMutableDictionary dictionary];
         roomSummaries = [NSMutableDictionary dictionary];
         _roomSummaryUpdateDelegate = [MXRoomSummaryUpdater roomSummaryUpdaterForSession:self];
@@ -254,6 +258,8 @@ typedef void (^MXOnResumeDone)(void);
         _eventStreamService = [[MXEventStreamService alloc] init];
         _preferredSyncPresence = MXPresenceOnline;
         _locationService = [[MXLocationService alloc] initWithSession:self];
+        _clientInformationService = [[MXClientInformationService alloc] initWithSession:self
+                                                                                 bundle:NSBundle.mainBundle];
         
         [self setIdentityServer:mxRestClient.identityServer andAccessToken:mxRestClient.credentials.identityServerAccessToken];
         
@@ -284,7 +290,11 @@ typedef void (^MXOnResumeDone)(void);
                                       kMXEventTypeStringCallHangup,
                                       kMXEventTypeStringCallReject,
                                       kMXEventTypeStringCallNegotiate,
-                                      kMXEventTypeStringSticker
+                                      kMXEventTypeStringSticker,
+                                      kMXEventTypeStringPollStart,
+                                      kMXEventTypeStringPollEnd,
+                                      kMXEventTypeStringPollStartMSC3381,
+                                      kMXEventTypeStringPollEndMSC3381
                                       ];
 
         _unreadEventTypes = @[kMXEventTypeStringRoomName,
@@ -301,6 +311,8 @@ typedef void (^MXOnResumeDone)(void);
         
         _homeserverCapabilitiesService = [[MXHomeserverCapabilitiesService alloc] initWithSession: self];
         [_homeserverCapabilitiesService updateWithCompletion:nil];
+        
+        _startupProgress = [[MXSessionStartupProgress alloc] init];
 
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDidDecryptEvent:) name:kMXEventDidDecryptNotification object:nil];
 
@@ -383,7 +395,10 @@ typedef void (^MXOnResumeDone)(void);
 
         // Check if the user has enabled crypto
         MXWeakify(self);
-        [MXCrypto checkCryptoWithMatrixSession:self complete:^(MXCrypto *crypto) {
+        [self initializeCryptoWithProgress:^(double progress) {
+            [self.startupProgress updateProgressForStage:MXSessionStartupStageStoreMigration progress:progress];
+            
+        } success:^(id<MXCrypto> crypto) {
             MXStrongifyAndReturnIfNil(self);
             
             self->_crypto = crypto;
@@ -482,6 +497,7 @@ typedef void (^MXOnResumeDone)(void);
                     {
                         [self fixRoomsSummariesLastMessageWithMaxServerPaginationCount:MXRoomSummaryPaginationChunkSize
                                                                                  force:YES
+                                                                              progress:nil
                                                                             completion:nil];
                     }
 
@@ -508,6 +524,11 @@ typedef void (^MXOnResumeDone)(void);
                 // The SDK client can use this data
                 onStoreDataReady();
             }
+        } failure:^(NSError *error) {
+            if (failure)
+            {
+                failure(error);
+            }
         }];
 
     } failure:^(NSError *error) {
@@ -517,6 +538,34 @@ typedef void (^MXOnResumeDone)(void);
         {
             failure(error);
         }
+    }];
+}
+
+- (void)initializeCryptoWithProgress:(void (^)(double))progress
+                             success:(void (^)(id<MXCrypto> crypto))success
+                             failure:(void (^)(NSError *error))failure
+{
+    BOOL enableCrypto = [MXSDKOptions sharedInstance].enableCryptoWhenStartingMXSession || [MXCryptoV2Factory.shared hasCryptoDataFor:self];
+    if (!enableCrypto)
+    {
+        MXLogWarning(@"[MXSession] initializeCrypto: Not starting crypto automatically due to SDK settings");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            success(nil);
+        });
+        return;
+    }
+    
+    [MXCryptoV2Factory.shared buildCryptoWithSession:self
+                                   migrationProgress:progress
+                                             success:^(id<MXCrypto> crypto) {
+        
+        MXLogDebug(@"[MXSession] initializeCrypto: Successfully initialized crypto module");
+        success(crypto);
+        
+    } failure:^(NSError *error) {
+        
+        MXLogErrorDetails(@"[MXSession] initializeCrypto: Error initialized crypto module", error);
+        failure(error);
     }];
 }
 
@@ -530,21 +579,20 @@ typedef void (^MXOnResumeDone)(void);
 
 /// Handle a sync response and decide serverTimeout for the next sync request.
 /// @param syncResponse The sync response object
+/// @param progress Progress block is called continuously to report current progress as a range between 0.0 - 1.0
 /// @param completion Completion block to be called at the end of the process. Will be called on the caller thread.
 /// @param storeCompletion Completion block to be called when the process completed at store level, i.e sync response is stored. Will be called on main thread.
 - (void)handleSyncResponse:(MXSyncResponse *)syncResponse
+                  progress:(void (^)(CGFloat))progress
                 completion:(void (^)(void))completion
            storeCompletion:(void (^)(void))storeCompletion
 {
     MXLogDebug(@"[MXSession] handleSyncResponse: Received %tu joined rooms, %tu invited rooms, %tu left rooms, %tu toDevice events.", syncResponse.rooms.join.count, syncResponse.rooms.invite.count, syncResponse.rooms.leave.count, syncResponse.toDevice.events.count);
     
-    [self.crypto handleSyncResponse:syncResponse];
-    
     // Check whether this is the initial sync
     BOOL isInitialSync = !self.isEventStreamInitialised;
 
-    // Handle to_device events before everything else to make future decryptions work
-    [self handleToDeviceEvents:syncResponse.toDevice.events onComplete:^{
+    [self handleCryptoEventsInSyncResponse:syncResponse onComplete:^{
         
         dispatch_group_t dispatchGroup = dispatch_group_create();
         
@@ -553,6 +601,20 @@ typedef void (^MXOnResumeDone)(void);
         {
             [self handleAccountData:syncResponse.accountData];
         }
+        
+        // Track progress only for rooms as they take the majority time during sync response
+        // processing, particularly for large accounts
+        NSInteger totalRooms = syncResponse.rooms.join.count + syncResponse.rooms.invite.count + syncResponse.rooms.leave.count;
+        __block NSInteger completedRooms = 0;
+        void(^dispatch_group_leave_with_progress)(dispatch_group_t) = ^(dispatch_group_t dispatchGroup) {
+            dispatch_group_leave(dispatchGroup);
+            
+            if (progress)
+            {
+                progress([self.startupProgress overallProgressForStep:completedRooms totalCount:totalRooms progress:1]);
+                completedRooms += 1;
+            }
+        };
         
         // Handle first joined rooms
         for (NSString *roomId in syncResponse.rooms.join)
@@ -580,25 +642,25 @@ typedef void (^MXOnResumeDone)(void);
                                 if (event.eventType == MXEventTypeRoomEncrypted)
                                 {
                                     [room.summary resetLastMessage:^{
-                                        dispatch_group_leave(dispatchGroup);
+                                        dispatch_group_leave_with_progress(dispatchGroup);
                                     } failure:^(NSError *error) {
-                                        dispatch_group_leave(dispatchGroup);
+                                        dispatch_group_leave_with_progress(dispatchGroup);
                                     } commit:NO];
                                 }
                                 else
                                 {
-                                    dispatch_group_leave(dispatchGroup);
+                                    dispatch_group_leave_with_progress(dispatchGroup);
                                 }
                             } failure:^(NSError *error) {
                                 MXLogErrorDetails(@"[MXSession] handleSyncResponse: event fetch failed", @{
                                     @"error": error ?: @"unknown"
                                 });
-                                dispatch_group_leave(dispatchGroup);
+                                dispatch_group_leave_with_progress(dispatchGroup);
                             }];
                         }
                         else
                         {
-                            dispatch_group_leave(dispatchGroup);
+                            dispatch_group_leave_with_progress(dispatchGroup);
                         }
                     }];
                 }];
@@ -637,7 +699,7 @@ typedef void (^MXOnResumeDone)(void);
                 [room handleInvitedRoomSync:invitedRoomSync onComplete:^{
                     [room.summary handleInvitedRoomSync:invitedRoomSync];
                     
-                    dispatch_group_leave(dispatchGroup);
+                    dispatch_group_leave_with_progress(dispatchGroup);
                 }];
             }
         }
@@ -689,7 +751,7 @@ typedef void (^MXOnResumeDone)(void);
                             // Remove the room from the rooms list
                             [self removeRoom:room.roomId];
                             
-                            dispatch_group_leave(dispatchGroup);
+                            dispatch_group_leave_with_progress(dispatchGroup);
                         }];
                     }];
                 }
@@ -734,28 +796,6 @@ typedef void (^MXOnResumeDone)(void);
         // Sync point: wait that all rooms in the /sync response have been loaded
         // and their /sync response has been processed
         dispatch_group_notify(dispatchGroup, dispatch_get_main_queue(), ^{
-            
-            if (self.crypto)
-            {
-                // Handle device list updates
-                if (syncResponse.deviceLists)
-                {
-                    [self.crypto handleDeviceListsChanges:syncResponse.deviceLists];
-                }
-                
-                // Handle one_time_keys_count
-                if (syncResponse.deviceOneTimeKeysCount)
-                {
-                    [self.crypto handleDeviceOneTimeKeysCount:syncResponse.deviceOneTimeKeysCount];
-                }
-                
-                [self.crypto handleDeviceUnusedFallbackKeys:syncResponse.unusedFallbackKeys];
-                
-                // Tell the crypto module to do its processing
-                [self.crypto onSyncCompleted:self.store.eventStreamToken
-                               nextSyncToken:syncResponse.nextBatch
-                                  catchingUp:self.catchingUp];
-            }
 
             // Update live event stream token
             MXLogDebug(@"[MXSession] Next sync token: %@", syncResponse.nextBatch);
@@ -935,6 +975,7 @@ typedef void (^MXOnResumeDone)(void);
             MXLogDebug(@"[MXSession] Crypto has been started");
         }  failure:^(NSError *error) {
             MXLogDebug(@"[MXSession] Crypto failed to start. Error: %@", error);
+            failure(error);
         }];
     }
     else
@@ -1109,9 +1150,18 @@ typedef void (^MXOnResumeDone)(void);
 
 - (void)resume:(void (^)(void))resumeDone
 {
-    [self handleBackgroundSyncCacheIfRequiredWithCompletion:^{
-        [self _resume:resumeDone];
-    }];
+    // The app has resumed there might have been a NSE run that have invalidated the cache
+    if (self.crypto) {
+        [self.crypto invalidateCache:^{
+            [self handleBackgroundSyncCacheIfRequiredWithCompletion:^{
+                [self _resume:resumeDone];
+            }];
+        }];
+    } else {
+        [self handleBackgroundSyncCacheIfRequiredWithCompletion:^{
+            [self _resume:resumeDone];
+        }];
+    }
 }
 
 - (void)_resume:(void (^)(void))resumeDone
@@ -1137,6 +1187,8 @@ typedef void (^MXOnResumeDone)(void);
             // Relaunch live events stream (long polling)
             [self serverSyncWithServerTimeout:0 success:nil failure:nil clientTimeout:CLIENT_TIMEOUT_MS setPresence:self.preferredSyncPresenceString];
         }
+
+        [self updateClientInformation];
     }
 
     for (MXPeekingRoom *peekingRoom in peekingRooms)
@@ -1149,6 +1201,10 @@ typedef void (^MXOnResumeDone)(void);
         MXLogDebug(@"[MXSession] _resume: cannot resume from the state: %@", [MXTools readableSessionState:_state]);
         resumeDone();
     }
+}
+
+- (void)updateClientInformation {
+    [self.clientInformationService updateData];
 }
 
 - (void)backgroundSync:(unsigned int)timeout success:(MXOnBackgroundSyncDone)backgroundSyncDone failure:(MXOnBackgroundSyncFail)backgroundSyncfails
@@ -1230,6 +1286,7 @@ typedef void (^MXOnResumeDone)(void);
     
     // Clean any cached initial sync response
     [self.initialSyncResponseCache deleteData];
+    self.startupProgress = nil;
     
     // Flush the store
     [self.storeService closeStores];
@@ -1403,10 +1460,18 @@ typedef void (^MXOnResumeDone)(void);
                       clientTimeout:(NSUInteger)clientTimeout
                         setPresence:(NSString*)setPresence
 {
+    // We only want to report sync progress when doing initial sync
+    BOOL shoulReportStartupProgress = !self.isEventStreamInitialised;
+    if (shoulReportStartupProgress)
+    {
+        // There is no way to track percentage progress when syncing with the server, so we always use 0%
+        // and only care about the `.serverSyncing` stage
+        [self.startupProgress updateProgressForStage:MXSessionStartupStageServerSyncing progress:0];
+    }
+    
     dispatch_group_t initialSyncDispatchGroup = dispatch_group_create();
     
     __block MXTaskProfile *syncTaskProfile;
-    __block StopDurationTracking stopDurationTracking;
     __block MXSyncResponse *syncResponse;
     __block BOOL useLiveResponse = YES;
 
@@ -1438,13 +1503,6 @@ typedef void (^MXOnResumeDone)(void);
             BOOL isInitialSync = !self.isEventStreamInitialised;
             MXTaskProfileName taskName = isInitialSync ? MXTaskProfileNameStartupInitialSync : MXTaskProfileNameStartupIncrementalSync;
             syncTaskProfile = [MXSDKOptions.sharedInstance.profiler startMeasuringTaskWithName:taskName];
-            if (isInitialSync) {
-                // Temporarily tracking performance both by `MXSDKOptions.sharedInstance.profiler` (manually measuring time)
-                // and `MXSDKOptions.sharedInstance.analyticsDelegate` (delegating to performance monitoring tool).
-                // This ambiguity will be resolved in the future
-                NSString *operation = MXSDKOptions.sharedInstance.enableGroupSessionCache ? @"initialSync.enableGroupSessionCache" : @"initialSync.diableGroupSessionCache";
-                stopDurationTracking = [MXSDKOptions.sharedInstance.analyticsDelegate startDurationTrackingForName:@"MXSession" operation:operation];
-            }
         }
         
         NSString * streamToken = self.store.eventStreamToken;
@@ -1487,9 +1545,6 @@ typedef void (^MXOnResumeDone)(void);
             syncTaskProfile.units = syncResponse.rooms.join.count;
             
             [MXSDKOptions.sharedInstance.profiler stopMeasuringTaskWithProfile:syncTaskProfile];
-            if (stopDurationTracking) {
-                stopDurationTracking();
-            }
         }
         
         BOOL isInitialSync = !self.isEventStreamInitialised;
@@ -1512,7 +1567,23 @@ typedef void (^MXOnResumeDone)(void);
             nextServerTimeout = 0;
         }
         
-        [self handleSyncResponse:syncResponse completion:^{
+        // A few local constants used to calculate overall progress for a number of different steps
+        // that occur during processing of sync response
+        NSInteger syncResponseStep = 0;
+        NSInteger roomSummariesStep = 1;
+        NSInteger processingStepsCount = 2;
+        
+        [self handleSyncResponse:syncResponse
+                        progress:^(CGFloat progress) {
+            if (shoulReportStartupProgress)
+            {
+                double overallProgress = [self.startupProgress overallProgressForStep:syncResponseStep
+                                                                           totalCount:processingStepsCount
+                                                                             progress:progress];
+                [self.startupProgress updateProgressForStage:MXSessionStartupStageProcessingResponse progress:overallProgress];
+            }
+        }
+                      completion:^{
             
             dispatch_group_t dispatchGroupLastMessage = dispatch_group_create();
             
@@ -1521,6 +1592,15 @@ typedef void (^MXOnResumeDone)(void);
                 dispatch_group_enter(dispatchGroupLastMessage);
                 [self fixRoomsSummariesLastMessageWithMaxServerPaginationCount:MXRoomSummaryPaginationChunkSize
                                                                          force:YES
+                                                                      progress:^(CGFloat progress) {
+                    if (shoulReportStartupProgress)
+                    {
+                        double overallProgress = [self.startupProgress overallProgressForStep:roomSummariesStep
+                                                                                   totalCount:processingStepsCount
+                                                                                     progress:progress];
+                        [self.startupProgress updateProgressForStage:MXSessionStartupStageProcessingResponse progress:overallProgress];
+                    }
+                }
                                                                     completion:^{
                     dispatch_group_leave(dispatchGroupLastMessage);
                 }];
@@ -1865,7 +1945,15 @@ typedef void (^MXOnResumeDone)(void);
             }
 
             // Update the corresponding part of account data
-            [_accountData updateWithEvent:event];
+            if (event[@"content"] == nil || [event[@"content"] count] == 0) {
+                /*
+                 MSC3391 returns an empty object in the sync after the user delete one account_data event using the associated DELETE endpoint.
+                 https://github.com/ShadowJonathan/matrix-doc/blob/account-data-delete/proposals/3391-account-data-delete.md#sync
+                 */
+                [_accountData deleteDataWithType:event[@"type"]];
+            } else {
+                [_accountData updateWithEvent:event];
+            }
 
             if ([event[@"type"] isEqualToString:kMXAccountDataTypeIdentityServer])
             {
@@ -1909,7 +1997,6 @@ typedef void (^MXOnResumeDone)(void);
             }
         }
 
-        [self validateAccountData];
         self.store.userAccountData = _accountData.accountData;
         
         // Trigger a global notification for the account data update
@@ -1919,22 +2006,6 @@ typedef void (^MXOnResumeDone)(void);
                                                                 object:self
                                                               userInfo:nil];
         }
-    }
-}
-
-/**
- Private method to validate local account data and report any potential state corruption
- */
-- (void)validateAccountData
-{
-    // Detecting an issue where more than one valid SSSS key is present on the client
-    // https://github.com/vector-im/element-ios/issues/4569
-    NSInteger keysCount = self.crypto.secretStorage.numberOfValidKeys;
-    if (keysCount > 1)
-    {
-        MXLogErrorDetails(@"[MXSession] validateAccountData: Detected multiple valid SSSS keys, should only have one at most", @{
-            @"count": @(keysCount)
-        });
     }
 }
 
@@ -1962,63 +2033,15 @@ typedef void (^MXOnResumeDone)(void);
     }
 }
 
-- (void)handleToDeviceEvents:(NSArray<MXEvent *> *)events  onComplete:(void (^)(void))onComplete
+- (void)handleCryptoEventsInSyncResponse:(MXSyncResponse *)syncResponse onComplete:(void (^)(void))onComplete
 {
-    if (events.count == 0)
+    if (!self.crypto)
     {
         onComplete();
         return;
     }
     
-    [self decryptEvents:events inTimeline:nil onComplete:^(NSArray<MXEvent *> *failedEvents) {
-        dispatch_group_t dispatchGroup = dispatch_group_create();
-        
-        for (MXEvent *event in events)
-        {
-            if (!event.decryptionError)
-            {
-                dispatch_group_enter(dispatchGroup);
-                [self handleToDeviceEvent:event onComplete:^{
-                    dispatch_group_leave(dispatchGroup);
-                }];
-            }
-            else
-            {
-                MXLogDebug(@"[MXSession] handleToDeviceEvents: Warning: Unable to decrypt to-device event: %@\nError: %@", event.wireContent[kMXMessageBodyKey], event.decryptionError);
-            }
-        }
-        
-        dispatch_group_notify(dispatchGroup, dispatch_get_main_queue(), ^{
-            onComplete();
-        });
-    }];
-}
-
-- (void)handleToDeviceEvent:(MXEvent *)event onComplete:(void (^)(void))onComplete
-{
-    void (^onHandleToDeviceEventDone)(void) = ^(void) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:kMXSessionOnToDeviceEventNotification
-                                                            object:self
-                                                          userInfo:@{
-                                                              kMXSessionNotificationEventKey: event
-                                                          }];
-        
-        onComplete();
-    };
-    
-    switch (event.eventType)
-    {
-        case MXEventTypeRoomKey:
-        {
-            [_crypto handleRoomKeyEvent:event onComplete:onHandleToDeviceEventDone];
-            break;
-        }
-
-        default:
-            onHandleToDeviceEventDone();
-            break;
-    }
-    [_eventStreamService dispatchOnLiveToDeviceWithEvent:event];
+    [self.crypto handleSyncResponse:syncResponse onComplete:onComplete];
 }
 
 /**
@@ -2049,8 +2072,8 @@ typedef void (^MXOnResumeDone)(void);
 {
     BOOL isInValidState = _state == MXSessionStateStoreDataReady || _state == MXSessionStatePaused;
     if (!isInValidState) {
-        NSString *message = [NSString stringWithFormat:@"[MXSession] state %@ is not valid to handle background sync cache, investigate why the method was called", [MXTools readableSessionState:_state]];
-        MXLogFailure(message);
+        NSString *message = [NSString stringWithFormat:@"[MXSession] handleBackgroundSyncCacheIfRequired: state %@ is not valid to handle background sync cache, investigate why the method was called", [MXTools readableSessionState:_state]];
+        MXLogError(message);
         if (completion)
         {
             completion();
@@ -2099,17 +2122,10 @@ typedef void (^MXOnResumeDone)(void);
     [asyncTaskQueue asyncWithExecute:^(void (^ taskCompleted)(void)) {
         [syncResponseStoreManager mergedSyncResponseFromSyncResponseIds:outdatedSyncResponseIds
                                                              completion:^(MXCachedSyncResponse * _Nullable outdatedCachedSyncResponse) {
-            if (outdatedCachedSyncResponse)
-            {
-                [self handleOutdatedSyncResponse:outdatedCachedSyncResponse.syncResponse
-                                      completion:^{
-                    taskCompleted();
-                }];
-            }
-            else
-            {
+            // There is no need to handle `outdatedCachedSyncResponse` manually anymore, ignoring the result
+            dispatch_async(dispatch_get_main_queue(), ^{
                 taskCompleted();
-            }
+            });
         }];
     }];
     
@@ -2119,6 +2135,7 @@ typedef void (^MXOnResumeDone)(void);
             if (cachedSyncResponse)
             {
                 [self handleSyncResponse:cachedSyncResponse.syncResponse
+                                progress:nil
                               completion:^{
                     taskCompleted();
                 } storeCompletion:nil];
@@ -2157,16 +2174,6 @@ typedef void (^MXOnResumeDone)(void);
     }];
 }
 
-- (void)handleOutdatedSyncResponse:(MXSyncResponse *)syncResponse
-                        completion:(void (^)(void))completion
-{
-    MXLogDebug(@"[MXSession] handleOutdatedSyncResponse: %tu joined rooms, %tu invited rooms, %tu left rooms, %tu toDevice events.", syncResponse.rooms.join.count, syncResponse.rooms.invite.count, syncResponse.rooms.leave.count, syncResponse.toDevice.events.count);
-    
-    // Handle only to_device events. They are sent only once by the homeserver
-    [self handleToDeviceEvents:syncResponse.toDevice.events onComplete:completion];
-}
-
-
 #pragma mark - Options
 - (void)enableVoIPWithCallStack:(id<MXCallStack>)callStack
 {
@@ -2182,23 +2189,38 @@ typedef void (^MXOnResumeDone)(void);
 
     if (enableCrypto && !_crypto)
     {
-        _crypto = [MXCrypto createCryptoWithMatrixSession:self];
-
-        if (_state == MXSessionStateRunning)
-        {
-            [_crypto start:success failure:failure];
-        }
-        else
-        {
-            MXLogDebug(@"[MXSesion] enableCrypto: crypto module will be start later (MXSession.state: %@)", [MXTools readableSessionState:_state]);
-
-            if (success)
+        MXWeakify(self);
+        [MXCryptoV2Factory.shared buildCryptoWithSession:self
+                                       migrationProgress:nil
+                                                 success:^(id<MXCrypto> crypto) {
+            
+            MXLogDebug(@"[MXSession] enableCrypto: Successfully initialized crypto module");
+            MXStrongifyAndReturnIfNil(self);
+            self->_crypto = crypto;
+            
+            if (self->_state == MXSessionStateRunning)
             {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    success();
-                });
+                [self startCrypto:success failure:failure];
             }
-        }
+            else
+            {
+                MXLogDebug(@"[MXSesion] enableCrypto: crypto module will be start later (MXSession.state: %@)", [MXTools readableSessionState:self->_state]);
+
+                if (success)
+                {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        success();
+                    });
+                }
+            }
+            
+        } failure:^(NSError *error) {
+            MXLogErrorDetails(@"[MXSession] enableCrypto: Error initialized crypto module", error);
+            if (failure)
+            {
+                failure(error);
+            }
+        }];
     }
     else if (!enableCrypto && _crypto)
     {
@@ -2376,8 +2398,12 @@ typedef void (^MXOnResumeDone)(void);
         {
             // When the flag isDirect is turned on, only one user id is expected in the inviteArray.
             // The room is considered as direct only for the first mentioned user in case of several user ids.
-            // Note: It is not possible FTM to mark as direct a room with an invited third party.
             NSString *directUserId = (parameters.inviteArray.count ? parameters.inviteArray.firstObject : nil);
+            // Fall back on the first invite3PID address.
+            if (!directUserId && parameters.invite3PIDArray != nil && parameters.invite3PIDArray.count > 0)
+            {
+                directUserId = parameters.invite3PIDArray.firstObject.address;
+            }
             [self onCreatedDirectChat:response withUserId:directUserId success:success];
         }
         else
@@ -2633,6 +2659,11 @@ typedef void (^MXOnResumeDone)(void);
     } failure:failure];
 }
 
+- (BOOL) isRoomMarkedAsUnread:(NSString*)roomId
+{
+    return [[self roomWithRoomId:roomId] isMarkedAsUnread];
+}
+
 - (void)joinPendingRoomInvites
 {
     NSArray<NSString *> *roomIds = [[self.invitedRooms valueForKey:@"roomId"] copy];
@@ -2746,6 +2777,36 @@ typedef void (^MXOnResumeDone)(void);
     }
     
     return nil;
+}
+
+- (MXHTTPOperation *)getOrCreateDirectJoinedRoomWithUserId:(NSString *)userId
+                                                   success:(void (^)(MXRoom *))success
+                                                   failure:(void (^)(NSError *))failure
+{
+    // Use an existing direct room if any
+    MXRoom *room = [self directJoinedRoomWithUserId:userId];
+    if (room)
+    {
+        success(room);
+        return nil;
+    }
+    
+    // Create a new DM with E2E by default if possible
+    MXWeakify(self);
+    return [self canEnableE2EByDefaultInNewRoomWithUsers:@[userId] success:^(BOOL canEnableE2E) {
+        MXStrongifyAndReturnIfNil(self);
+        
+        MXRoomCreationParameters *roomCreationParameters = [MXRoomCreationParameters parametersForDirectRoomWithUser:userId];
+        
+        if (canEnableE2E)
+        {
+            roomCreationParameters.initialStateEvents = @[
+                                                          [MXRoomCreationParameters initialStateEventForEncryptionWithAlgorithm:kMXCryptoMegolmAlgorithm
+                                                           ]];
+        }
+
+        [self createRoomWithParameters:roomCreationParameters success:success failure:failure];
+    } failure:failure];
 }
 
 // Return ids of all current direct rooms
@@ -3018,6 +3079,8 @@ typedef void (^MXOnResumeDone)(void);
         // And remove the room and its summary from the list
         [rooms removeObjectForKey:roomId];
         [roomSummaries removeObjectForKey:roomId];
+        // Remove room from breadcrub list
+        [self removeBreadcrumbWithRoomWithId:roomId success:nil failure:nil];
 
         // Broadcast the left room
         [[NSNotificationCenter defaultCenter] postNotificationName:kMXSessionDidLeaveRoomNotification
@@ -3148,7 +3211,7 @@ typedef void (^MXOnResumeDone)(void);
 
 
 #pragma mark - Rooms summaries
-- (MXRoomSummary *)roomSummaryWithRoomId:(NSString*)roomId
+- (nullable MXRoomSummary *)roomSummaryWithRoomId:(NSString*)roomId
 {
     MXRoomSummary *roomSummary;
 
@@ -3164,6 +3227,15 @@ typedef void (^MXOnResumeDone)(void);
             {
                 roomSummary = [[MXRoomSummary alloc] initWithSummaryModel:roomSummaryProtocol];
                 [roomSummary setMatrixSession:self];
+                
+                if (roomSummary.lastMessage.hasDecryptionError)
+                {
+                    // Try to decrypt it again.
+                    // It will also trigger the mechanism to automatically retry and refresh the last message if we
+                    // receive the key later
+                    [self eventWithEventId:roomSummary.lastMessage.eventId inRoom:roomSummary.roomId success:nil failure:nil];
+                }
+                
                 roomSummaries[roomId] = roomSummary;
             }
         }
@@ -3199,11 +3271,13 @@ typedef void (^MXOnResumeDone)(void);
 {
     [self fixRoomsSummariesLastMessageWithMaxServerPaginationCount:maxServerPaginationCount
                                                              force:NO
+                                                          progress:nil
                                                         completion:nil];
 }
 
 - (void)fixRoomsSummariesLastMessageWithMaxServerPaginationCount:(NSUInteger)maxServerPaginationCount
                                                            force:(BOOL)force
+                                                        progress:(void(^)(CGFloat))progress
                                                       completion:(void(^)(void))completion
 {
     if (fixingRoomsLastMessages)
@@ -3217,6 +3291,18 @@ typedef void (^MXOnResumeDone)(void);
     fixingRoomsLastMessages = YES;
     
     dispatch_group_t dispatchGroup = dispatch_group_create();
+    
+    // Prepare block that will leave a dispatch group and update progress
+    // each time a room has been processed
+    __block NSInteger completedRooms = 0;
+    void(^dispatch_group_leave_with_progress)(dispatch_group_t) = ^(dispatch_group_t dispatchGroup) {
+        dispatch_group_leave(dispatchGroup);
+        if (progress)
+        {
+            progress([self.startupProgress overallProgressForStep:completedRooms totalCount:self.rooms.count progress:1]);
+            completedRooms += 1;
+        }
+    };
     
     for (MXRoom *room in self.rooms)
     {
@@ -3239,11 +3325,11 @@ typedef void (^MXOnResumeDone)(void);
             MXLogDebug(@"[MXSession] fixRoomsSummariesLastMessage: Fixing last message for room %@", summary.roomId);
             
             [summary resetLastMessageWithMaxServerPaginationCount:maxServerPaginationCount onComplete:^{
-                MXLogDebug(@"[MXSession] fixRoomsSummariesLastMessage:Fixing last message operation for room %@ has complete. lastMessageEventId: %@", summary.roomId, summary.lastMessage.eventId);
-                dispatch_group_leave(dispatchGroup);
+                MXLogDebug(@"[MXSession] fixRoomsSummariesLastMessage: Fixing last message operation for room %@ has complete. lastMessageEventId: %@", summary.roomId, summary.lastMessage.eventId);
+                dispatch_group_leave_with_progress(dispatchGroup);
             } failure:^(NSError *error) {
                 MXLogDebug(@"[MXSession] fixRoomsSummariesLastMessage: Cannot fix last message for room %@ with maxServerPaginationCount: %@", summary.roomId, @(maxServerPaginationCount));
-                dispatch_group_leave(dispatchGroup);
+                dispatch_group_leave_with_progress(dispatchGroup);
             }
                                                            commit:NO];
         }
@@ -3259,24 +3345,24 @@ typedef void (^MXOnResumeDone)(void);
                     MXLogDebug(@"[MXSession] fixRoomsSummariesLastMessage: Fixing last message for room %@", summary.roomId);
                     
                     [summary resetLastMessageWithMaxServerPaginationCount:maxServerPaginationCount onComplete:^{
-                        MXLogDebug(@"[MXSession] fixRoomsSummariesLastMessage:Fixing last message operation for room %@ has complete. lastMessageEventId: %@", summary.roomId, summary.lastMessage.eventId);
-                        dispatch_group_leave(dispatchGroup);
+                        MXLogDebug(@"[MXSession] fixRoomsSummariesLastMessage: Fixing last message operation for room %@ has complete. lastMessageEventId: %@", summary.roomId, summary.lastMessage.eventId);
+                        dispatch_group_leave_with_progress(dispatchGroup);
                     } failure:^(NSError *error) {
                         MXLogDebug(@"[MXSession] fixRoomsSummariesLastMessage: Cannot fix last message for room %@ with maxServerPaginationCount: %@", summary.roomId, @(maxServerPaginationCount));
-                        dispatch_group_leave(dispatchGroup);
+                        dispatch_group_leave_with_progress(dispatchGroup);
                     }
                                                                    commit:NO];
                 }
                 else
                 {
-                    dispatch_group_leave(dispatchGroup);
+                    dispatch_group_leave_with_progress(dispatchGroup);
                 }
                 
             } failure:^(NSError *error) {
                 MXLogErrorDetails(@"[MXSession] fixRoomsSummariesLastMessage: event fetch failed", @{
                     @"error": error ?: @"unknown"
                 });
-                dispatch_group_leave(dispatchGroup);
+                dispatch_group_leave_with_progress(dispatchGroup);
             }];
         }
         else if (!summary.lastMessage)
@@ -3285,11 +3371,11 @@ typedef void (^MXOnResumeDone)(void);
             MXLogDebug(@"[MXSession] fixRoomsSummariesLastMessage: Fixing last message for room %@", summary.roomId);
             
             [summary resetLastMessageWithMaxServerPaginationCount:maxServerPaginationCount onComplete:^{
-                MXLogDebug(@"[MXSession] fixRoomsSummariesLastMessage:Fixing last message operation for room %@ has complete. lastMessageEventId: %@", summary.roomId, summary.lastMessage.eventId);
-                dispatch_group_leave(dispatchGroup);
+                MXLogDebug(@"[MXSession] fixRoomsSummariesLastMessage: Fixing last message operation for room %@ has complete. lastMessageEventId: %@", summary.roomId, summary.lastMessage.eventId);
+                dispatch_group_leave_with_progress(dispatchGroup);
             } failure:^(NSError *error) {
                 MXLogDebug(@"[MXSession] fixRoomsSummariesLastMessage: Cannot fix last message for room %@ with maxServerPaginationCount: %@", summary.roomId, @(maxServerPaginationCount));
-                dispatch_group_leave(dispatchGroup);
+                dispatch_group_leave_with_progress(dispatchGroup);
             }
                                                            commit:NO];
         }
@@ -3996,20 +4082,8 @@ typedef void (^MXOnResumeDone)(void);
     NSDictionary *data = @{
                            kMXAccountDataKeyIgnoredUser: ignoredUsersDict
                            };
-//    __weak __typeof(self)weakSelf = self;
     return [self setAccountData:data forType:kMXAccountDataTypeIgnoredUserList success:^{
-
-//        __strong __typeof(weakSelf)strongSelf = weakSelf;
-
-        // Update self.ignoredUsers right now
-// Commented as it created race condition with /sync response handling
-//        NSMutableArray *newIgnoredUsers = [NSMutableArray arrayWithArray:strongSelf->_ignoredUsers];
-//        for (NSString *userId in userIds)
-//        {
-//            [newIgnoredUsers removeObject:userId];
-//        }
-//        strongSelf->_ignoredUsers = newIgnoredUsers;
-
+        
         if (success)
         {
             success();
@@ -4358,6 +4432,22 @@ typedef void (^MXOnResumeDone)(void);
     } failure:failure];
 }
 
+- (MXHTTPOperation *)deleteAccountDataWithType:(NSString *)type success:(void (^)(void))success failure:(void (^)(NSError *))failure
+{
+    MXWeakify(self);
+    return [matrixRestClient deleteAccountDataWithType:type success:^{
+        MXStrongifyAndReturnIfNil(self);
+        
+        // Delete account data locally
+        [self->_accountData deleteDataWithType:type];
+        
+        if (success)
+        {
+            success();
+        }
+    } failure:failure];
+}
+
 - (MXHTTPOperation *)setAccountDataIdentityServer:(NSString *)identityServer
                                           success:(void (^)(void))success
                                           failure:(void (^)(NSError *))failure
@@ -4548,6 +4638,43 @@ typedef void (^MXOnResumeDone)(void);
             failure(error);
         }
     }];
+}
+
+// Update breadcrub list when leaving a room
+- (void)removeBreadcrumbWithRoomWithId:(NSString *)roomId
+                               success:(void (^)(void))success
+                               failure:(void (^)(NSError *error))failure
+{
+    NSDictionary<NSString *, NSArray *> *breadcrumbs = [self.accountData accountDataForEventType:kMXAccountDataTypeBreadcrumbs];
+    
+    NSMutableArray<NSString *> *recentRoomIds = breadcrumbs[kMXAccountDataTypeRecentRoomsKey] ? [NSMutableArray arrayWithArray:breadcrumbs[kMXAccountDataTypeRecentRoomsKey]] : [NSMutableArray array];
+    
+    NSInteger index = [recentRoomIds indexOfObject:roomId];
+    if (index != NSNotFound)
+    {
+        [recentRoomIds removeObjectAtIndex:index];
+       
+        [self setAccountData:@{kMXAccountDataTypeRecentRoomsKey : recentRoomIds}
+                     forType:kMXAccountDataTypeBreadcrumbs
+                      success:^{
+             if (success)
+             {
+                 success();
+             }
+         } failure:^(NSError *error) {
+             if (failure)
+             {
+                 failure(error);
+             }
+         }];
+    } 
+    else 
+    {
+        if (success)
+        {
+            success();
+        }
+    }
 }
 
 #pragma mark - Homeserver information
@@ -4791,33 +4918,6 @@ typedef void (^MXOnResumeDone)(void);
     }
 }
 
-- (BOOL)decryptEvent:(MXEvent*)event inTimeline:(NSString*)timeline
-{
-    MXEventDecryptionResult *result;
-    if (event.eventType == MXEventTypeRoomEncrypted)
-    {
-        if (_crypto)
-        {
-            // TODO: One day, this method will be async
-            result = [_crypto decryptEvent:event inTimeline:timeline];
-        }
-        else
-        {
-            // Encryption not enabled
-            result = [MXEventDecryptionResult new];
-            result.error = [NSError errorWithDomain:MXDecryptingErrorDomain
-                                               code:MXDecryptingErrorEncryptionNotEnabledCode
-                                           userInfo:@{
-                                               NSLocalizedDescriptionKey: MXDecryptingErrorEncryptionNotEnabledReason
-                                           }];
-        }
-        
-        [event setClearData:result];
-    }
-    
-    return (result.error == nil);
-}
-
 - (void)decryptEvents:(NSArray<MXEvent*> *)events
            inTimeline:(NSString*)timeline
            onComplete:(void (^)(NSArray<MXEvent*> *failedEvents))onComplete
@@ -4853,7 +4953,7 @@ typedef void (^MXOnResumeDone)(void);
                     [failedEvents addObject:event];
                 }
             }
-            
+
             onComplete(failedEvents);
         }];
     }
@@ -4875,14 +4975,6 @@ typedef void (^MXOnResumeDone)(void);
     }
 }
 
-- (void)resetReplayAttackCheckInTimeline:(NSString*)timeline
-{
-    if (_crypto)
-    {
-        [_crypto resetReplayAttackCheckInTimeline:timeline];
-    }
-}
-
 // Called when an event finally got decrypted after a late room key reception
 - (void)onDidDecryptEvent:(NSNotification *)notification
 {
@@ -4892,6 +4984,12 @@ typedef void (^MXOnResumeDone)(void);
     MXRoomSummary *summary = [self roomSummaryWithRoomId:event.roomId];
     if (summary)
     {
+        if (!summary.lastMessage)
+        {
+            [summary resetLastMessage:nil failure:nil commit:YES];
+            return;
+        }
+
         [self eventWithEventId:summary.lastMessage.eventId
                         inRoom:summary.roomId
                        success:^(MXEvent *lastEvent) {

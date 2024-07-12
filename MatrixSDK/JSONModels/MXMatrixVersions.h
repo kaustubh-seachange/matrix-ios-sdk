@@ -35,6 +35,7 @@ struct MXMatrixClientServerAPIVersionStruct
     __unsafe_unretained NSString * const v1_1;
     __unsafe_unretained NSString * const v1_2;
     __unsafe_unretained NSString * const v1_3;
+    __unsafe_unretained NSString * const v1_11;
 };
 extern const struct MXMatrixClientServerAPIVersionStruct MXMatrixClientServerAPIVersion;
 
@@ -65,7 +66,7 @@ extern const struct MXMatrixVersionsFeatureStruct MXMatrixVersionsFeature;
 
 /**
  The unstable features supported by the server.
-
+ 
  */
 @property (nonatomic, nullable, readonly) NSDictionary<NSString*, NSNumber*> *unstableFeatures;
 
@@ -97,6 +98,36 @@ extern const struct MXMatrixVersionsFeatureStruct MXMatrixVersionsFeature;
  Indicate if the server supports threads via MSC3440.
  */
 @property (nonatomic, readonly) BOOL supportsThreads;
+
+/**
+ Indicate if the server supports Remotely toggling push notifications via MSC3881.
+ */
+@property (nonatomic, readonly) BOOL supportsRemotelyTogglingPushNotifications;
+
+/**
+ Indicate if the server supports logging in via a QR
+ */
+@property (nonatomic, readonly) BOOL supportsQRLogin;
+
+/**
+ Indicate if the server supports notifications for threads (MSC3773)
+ */
+@property (nonatomic, readonly) BOOL supportsNotificationsForThreads;
+
+/**
+ Indicate if the server supports redactions with relations (MSC3912)
+ */
+@property (nonatomic, readonly) BOOL supportsRedactionWithRelations;
+
+/**
+ Indicate if the server supports redactions with relations (MSC3912 - Unstable)
+ */
+@property (nonatomic, readonly) BOOL supportsRedactionWithRelationsUnstable;
+
+/**
+ Indicate if the server supports MSC3916
+ */
+@property (nonatomic, readonly) BOOL supportsAuthenticatedMedia;
 
 @end
 

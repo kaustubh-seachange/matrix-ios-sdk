@@ -52,7 +52,7 @@ NSString * const kMXCallKitAdapterAudioSessionDidActive = @"kMXCallKitAdapterAud
     {
         CXProviderConfiguration *providerConfiguration = [[CXProviderConfiguration alloc] initWithLocalizedName:configuration.name];
         providerConfiguration.ringtoneSound = configuration.ringtoneName;
-        providerConfiguration.maximumCallGroups = 1;
+        providerConfiguration.maximumCallGroups = configuration.maximumCallGroups;
         providerConfiguration.maximumCallsPerCallGroup = 1;
         providerConfiguration.supportedHandleTypes = [NSSet setWithObject:@(CXHandleTypeGeneric)];
         providerConfiguration.supportsVideo = configuration.supportsVideo;
@@ -225,6 +225,14 @@ NSString * const kMXCallKitAdapterAudioSessionDidActive = @"kMXCallKitAdapterAud
     update.supportsGrouping = NO;
     update.supportsUngrouping = NO;
     update.supportsDTMF = NO;
+    
+    // If the user tap the "Answer" button from Element's timeline, very often, he can't hear the other user.
+    // It's because the audio session is not configured at the beginiing of the call.
+    // It's a flaw in CallKit implementation.
+    // The audio session need to be configured earlier, like here.
+    //
+    // See https://developer.apple.com/forums/thread/64544 (7th post from Apple Engineer)
+    [self.audioSessionConfigurator configureAudioSessionForVideoCall:call.isVideoCall];
     
     [self.provider reportNewIncomingCallWithUUID:callUUID update:update completion:^(NSError * _Nullable error) {
         if (error)
@@ -401,7 +409,7 @@ NSString * const kMXCallKitAdapterAudioSessionDidActive = @"kMXCallKitAdapterAud
 {
     if (call.isConferenceCall)
     {
-        onComplete(call.room.summary.displayname);
+        onComplete(call.room.summary.displayName);
     }
     else
     {

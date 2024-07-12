@@ -176,6 +176,26 @@
  */
 - (NSArray<MXEvent*>* _Nonnull)relationsForEvent:(nonnull NSString*)eventId inRoom:(nonnull NSString*)roomId relationType:(nonnull NSString*)relationType;
 
+/**
+ Set the room as unread, add the room to the unread list
+ 
+ @param roomId the id of the room.
+ */
+- (void)setUnreadForRoom:(nonnull NSString*)roomId;
+
+/**
+ Remove the room from unread list
+ 
+ @param roomId the id of the room.
+ */
+- (void)resetUnreadForRoom:(nonnull NSString*)roomId;
+
+/**
+ Set the room as unread
+ 
+ @param roomId the id of the room.
+ */
+- (BOOL)isRoomMarkedAsUnread:(nonnull NSString*)roomId;
 
 #pragma mark - Matrix users
 /**
@@ -250,11 +270,13 @@
  
  @param roomId The room Id.
  @param eventId The event Id.
+ @param threadId The thread Id. kMXEventTimelineMain for the main timeline.
  @param sort to sort them from the latest to the oldest
  @param completion Completion block containing the receipts for an event in a dedicated room.
  */
 - (void)getEventReceipts:(nonnull NSString*)roomId
                  eventId:(nonnull NSString*)eventId
+                threadId:(nonnull NSString*)threadId
                   sorted:(BOOL)sort
               completion:(nonnull void (^)(NSArray<MXReceiptData*> * _Nonnull))completion;
 
@@ -268,13 +290,23 @@
 - (BOOL)storeReceipt:(nonnull MXReceiptData*)receipt inRoom:(nonnull NSString*)roomId;
 
 /**
- Retrieve the receipt for a user in a room
+ Retrieve the receipt for a user within all threads in a room
  
  @param roomId The roomId
  @param userId The user identifier
+ @return all the currently stored receipts ordered by thread ID.
+ */
+- (nonnull NSDictionary<NSString *, MXReceiptData *> *)getReceiptsInRoom:(nonnull NSString*)roomId forUserId:(nonnull NSString*)userId;
+
+/**
+ Retrieve the receipt for a user in a room within a specific thread.
+ 
+ @param roomId The roomId
+ @param threadId The ID of the thread. kMXEventTimelineMain for the main timeline.
+ @param userId The user identifier
  @return the current stored receipt (nil by default).
  */
-- (MXReceiptData * _Nullable)getReceiptInRoom:(nonnull NSString*)roomId forUserId:(nonnull NSString*)userId;
+- (nullable MXReceiptData *)getReceiptInRoom:(nonnull NSString*)roomId threadId:(nonnull NSString*)threadId forUserId:(nonnull NSString*)userId;
 
 /**
  Load receipts for a room asynchronously.
@@ -296,6 +328,18 @@
  @return The number of unread events which have their type listed in the provided array.
  */
 - (NSUInteger)localUnreadEventCount:(nonnull NSString*)roomId threadId:(nullable NSString*)threadId withTypeIn:(nullable NSArray*)types;
+
+/**
+ Count the unread events wrote in the store per thread.
+ 
+ @discussion: The returned count is relative to the local storage. The actual unread messages
+ for a room may be higher than the returned value.
+ 
+ @param roomId the room id.
+ @param types an array of event types strings (MXEventTypeString).
+ @return The number of unread events per thread which have their type listed in the provided array.
+ */
+- (nonnull NSDictionary <NSString *, NSNumber *> *)localUnreadEventCountPerThread:(nonnull NSString*)roomId withTypeIn:(nullable NSArray*)types;
 
 /**
  Incoming events since the last user receipt data.
@@ -381,6 +425,18 @@
  @param outgoingMessage the MXEvent object of the message.
  */
 - (void)storeOutgoingMessageForRoom:(nonnull NSString*)roomId outgoingMessage:(nonnull MXEvent*)outgoingMessage;
+
+/**
+ Remove all the messages sent before a specific timestamp in a room.
+ The state events are not removed during this operation. We keep them in the timeline.
+ This operation doesn't change the pagination token, and the flag indicating that the SDK has reached the end of pagination.
+ 
+ @param limitTs the timestamp from which the messages are kept.
+ @param roomId the id of the room.
+ 
+ @return YES if at least one event has been removed.
+ */
+- (BOOL)removeAllMessagesSentBefore:(uint64_t)limitTs inRoom:(nonnull NSString *)roomId;
 
 /**
  Remove all outgoing messages from a room.
@@ -548,6 +604,5 @@
 - (void)filterIdForFilter:(nonnull MXFilterJSONModel*)filter
                   success:(nonnull void (^)(NSString * _Nullable filterId))success
                   failure:(nullable void (^)(NSError * _Nullable error))failure;
-
 
 @end

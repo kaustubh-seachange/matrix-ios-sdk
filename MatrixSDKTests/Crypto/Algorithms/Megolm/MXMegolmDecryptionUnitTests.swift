@@ -15,6 +15,7 @@
 //
 
 import Foundation
+import MatrixSDKCrypto
 @testable import MatrixSDK
 
 class MXMegolmDecryptionUnitTests: XCTestCase {
@@ -24,7 +25,7 @@ class MXMegolmDecryptionUnitTests: XCTestCase {
     }
     
     /// Spy olm device used to collect spy sessions for the purpose of test assertions
-    class SpyDevice: MXOlmDevice {
+    class DeviceStub: MXOlmDevice {
         var sessions: [SpySession] = []
         
         override func addInboundGroupSession(
@@ -35,12 +36,26 @@ class MXMegolmDecryptionUnitTests: XCTestCase {
             forwardingCurve25519KeyChain: [String]!,
             keysClaimed: [String : String]!,
             exportFormat: Bool,
-            sharedHistory: Bool
+            sharedHistory: Bool,
+            untrusted: Bool
         ) -> Bool {
             sessions.append(
                 .init(sharedHistory: sharedHistory)
             )
             return true
+        }
+        
+        var stubbedResult: MXDecryptionResult?
+        
+        override func decryptGroupMessage(
+            _ body: String!,
+            isEditEvent: Bool,
+            roomId: String!,
+            inTimeline timeline: String!,
+            sessionId: String!,
+            senderKey: String!
+        ) throws -> MXDecryptionResult {
+            stubbedResult ?? MXDecryptionResult()
         }
     }
     
@@ -71,15 +86,17 @@ class MXMegolmDecryptionUnitTests: XCTestCase {
     }
     
     /// Stub of crypto which connects various other stubbed objects (device, session)
-    class CryptoStub: MXCrypto {
+    class CryptoStub: MXLegacyCrypto {
         private let device: MXOlmDevice
         private let cryptoStore: MXCryptoStore
         private let session: MXSession
+        private let devices: MXDeviceList
         
-        init(device: MXOlmDevice, store: MXCryptoStore, session: MXSession) {
+        init(device: MXOlmDevice, store: MXCryptoStore, session: MXSession, devices: MXDeviceList) {
             self.device = device
             self.cryptoStore = store
             self.session = session
+            self.devices = devices
         }
         
         override var olmDevice: MXOlmDevice! {
@@ -97,6 +114,25 @@ class MXMegolmDecryptionUnitTests: XCTestCase {
         override var mxSession: MXSession! {
             return session
         }
+        
+        override var deviceList: MXDeviceList! {
+            return devices
+        }
+        
+        override func trustLevel(forUser userId: String) -> MXUserTrustLevel {
+            return MXUserTrustLevel(crossSigningVerified: true, locallyVerified: true)
+        }
+    }
+    
+    class DeviceListStub: MXDeviceList {
+        var stubbedDevices = [String: Device]()
+        override func device(withIdentityKey senderKey: String!, andAlgorithm algorithm: String!) -> MXDeviceInfo! {
+            guard algorithm != nil, let senderKey = senderKey, let device = stubbedDevices[senderKey] else {
+                return nil
+            }
+            
+            return .init(device: .init(device: device))
+        }
     }
     
     let roomId1 = "ABC"
@@ -105,18 +141,21 @@ class MXMegolmDecryptionUnitTests: XCTestCase {
     let sessionId2 = "999"
     let senderKey = "456"
     
-    var device: SpyDevice!
+    var device: DeviceStub!
     var store: CryptoStoreStub!
     var session: SessionStub!
+    var crypto: CryptoStub!
+    var devicesList: DeviceListStub!
     var decryption: MXMegolmDecryption!
     
     override func setUp() {
         super.setUp()
         
-        device = SpyDevice()
+        device = DeviceStub()
         store = CryptoStoreStub()
         session = SessionStub()
-        let crypto = CryptoStub(device: device, store: store, session: session)
+        devicesList = DeviceListStub()
+        crypto = CryptoStub(device: device, store: store, session: session, devices: devicesList)
         decryption = MXMegolmDecryption(crypto: crypto)
     }
     
@@ -137,7 +176,9 @@ class MXMegolmDecryptionUnitTests: XCTestCase {
         session.historyVisibility = kMXRoomHistoryVisibilityWorldReadable
         
         for (eventValue, expectedValue) in eventToExpectation {
-            let event = makeRoomKeyEvent(sharedHistory: eventValue)
+            let event = MXEvent.roomKeyFixture(
+                sharedHistory: eventValue
+            )
             device.sessions = []
             
             decryption.onRoomKeyEvent(event)
@@ -214,28 +255,74 @@ class MXMegolmDecryptionUnitTests: XCTestCase {
         }
     }
     
-    // MARK: - Helpers
-    
-    /// Create a room key event with some random but valid data that can be used to create a new inbound session.
-    private func makeRoomKeyEvent(sharedHistory: Bool? = nil) -> MXEvent? {
-        let event = MXEvent(fromJSON: [
-            "sender_key": senderKey,
-        ])
+    func test_decryptEvent_untrustedResult() {
+        let event = MXEvent.encryptedFixture()
+        device.stubbedResult = MXDecryptionResult()
+        device.stubbedResult?.senderKey = "ABCD"
         
-        var content: [String: Any] = [
-            "room_id": roomId1,
-            "session_id": sessionId1,
-            "session_key": "123",
-            "algorithm": "456",
+        devicesList.stubbedDevices = [
+            "ABCD": Device.stub(
+                locallyTrusted: false,
+                crossSigningTrusted: true
+            )
         ]
-        if let sharedHistory = sharedHistory {
-            content["org.matrix.msc3061.shared_history"] = sharedHistory
-        }
         
-        let result = MXEventDecryptionResult()
-        result.senderCurve25519Key = "XYZ"
-        result.clearEvent = ["content": content]
-        event?.setClearData(result)
-        return event
+        device.stubbedResult?.isUntrusted = true
+        let result1 = decryption.decryptEvent(event, inTimeline: nil)
+        XCTAssertEqual(result1?.decoration.color, .grey)
+        
+        device.stubbedResult?.isUntrusted = false
+        let result2 = decryption.decryptEvent(event, inTimeline: nil)
+        XCTAssertEqual(result2?.decoration.color, MXEventDecryptionDecorationColor.none)
+    }
+    
+    func test_decryptEvent_untrustedDevice() {
+        let event = MXEvent.encryptedFixture()
+        device.stubbedResult = MXDecryptionResult()
+        device.stubbedResult?.senderKey = "XYZ"
+        
+        devicesList.stubbedDevices = [
+            "XYZ": Device.stub(
+                locallyTrusted: false,
+                crossSigningTrusted: false
+            )
+        ]
+        let result1 = decryption.decryptEvent(event, inTimeline: nil)
+        XCTAssertEqual(result1?.decoration.color, .red)
+        
+        devicesList.stubbedDevices = [
+            "XYZ": Device.stub(
+                locallyTrusted: false,
+                crossSigningTrusted: true
+            )
+        ]
+        let result2 = decryption.decryptEvent(event, inTimeline: nil)
+        XCTAssertEqual(result2?.decoration.color, MXEventDecryptionDecorationColor.none)
+    }
+    
+    func test_decryptEvent_unknownDevice() {
+        let invalidKey = "123"
+        let validKey = "456"
+        
+        let event = MXEvent.encryptedFixture()
+        device.stubbedResult = MXDecryptionResult()
+        device.stubbedResult?.senderKey = validKey
+        
+        let stub = Device.stub(
+            locallyTrusted: true,
+            crossSigningTrusted: true
+        )
+        
+        devicesList.stubbedDevices = [
+            invalidKey: stub
+        ]
+        let result1 = decryption.decryptEvent(event, inTimeline: nil)
+        XCTAssertEqual(result1?.decoration.color, .red)
+        
+        devicesList.stubbedDevices = [
+            validKey: stub
+        ]
+        let result2 = decryption.decryptEvent(event, inTimeline: nil)
+        XCTAssertEqual(result2?.decoration.color, MXEventDecryptionDecorationColor.none)
     }
 }

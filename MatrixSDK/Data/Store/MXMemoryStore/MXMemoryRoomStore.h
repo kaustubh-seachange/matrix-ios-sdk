@@ -49,6 +49,16 @@
 - (void)replaceEvent:(MXEvent*)event;
 
 /**
+ Remove all the messages sent before a specific timestamp in a room.
+ The state events are not removed during this operation. We keep them in the timeline.
+ 
+ @param limitTs the timestamp from which the messages are kept.
+ 
+ @return YES if at least one event has been removed.
+ */
+- (BOOL)removeAllMessagesSentBefore:(uint64_t)limitTs;
+
+/**
  Get an event from this room.
 
  @return the MXEvent object or nil if not found.
@@ -91,6 +101,15 @@
  @return the events enumerator.
  */
 - (id<MXEventsEnumerator>)enumeratorForMessagesWithTypeIn:(NSArray*)types;
+
+/**
+ Get all events in thread since the root message event.
+
+ @param threadId the thread id to find events in.
+ @param types a set of event types strings (MXEventTypeString).
+ @return the messages events after an event Id
+ */
+- (NSArray<MXEvent*>*)eventsInThreadWithThreadId:(NSString *)threadId except:(NSString *)userId withTypeIn:(NSSet<MXEventTypeString>*)types;
 
 /**
  Get all events newer than the event with the passed id.

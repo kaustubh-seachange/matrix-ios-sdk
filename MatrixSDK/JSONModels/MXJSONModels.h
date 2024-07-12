@@ -533,6 +533,17 @@ FOUNDATION_EXPORT NSString *const kMXPresenceOffline;
 
 @end
 
+/**
+ `MXLoginToken` represents the response of a /login/token creation request
+ */
+@interface MXLoginToken : MXJSONModel
+
+@property (nonatomic) NSString *token;
+
+@property (nonatomic) uint64_t expiresIn;
+
+@end
+
 
 @class MXPushRuleCondition;
 
@@ -767,17 +778,11 @@ FOUNDATION_EXPORT NSString *const kMXPushRuleConditionStringSenderNotificationPe
  Push rule scope definitions - String version
  */
 FOUNDATION_EXPORT NSString *const kMXPushRuleScopeStringGlobal;
-FOUNDATION_EXPORT NSString *const kMXPushRuleScopeStringDevice;
 
 /**
  `MXPushRulesResponse` represents the response to the /pushRules/ request.
  */
 @interface MXPushRulesResponse : MXJSONModel
-
-    /**
-     Set of push rules specific per device.
-     */
-    // @property (nonatomic) NSDictionary *device;
 
     /**
      Set of global push rules.
@@ -1120,6 +1125,25 @@ FOUNDATION_EXPORT NSString *const kMXPushRuleScopeStringDevice;
 
 @end
 
+@interface MXKeysQueryResponseRaw : MXJSONModel
+
+    /**
+     The device keys per devices per users.
+     */
+    @property (nonatomic) NSDictionary<NSString *, id> *deviceKeys;
+
+    /**
+     Cross-signing keys per users.
+     */
+    @property (nonatomic) NSDictionary<NSString*, MXCrossSigningInfo*> *crossSigningKeys;
+
+    /**
+     The failures sorted by homeservers.
+    */
+    @property (nonatomic) NSDictionary *failures;
+
+@end
+
 /**
  `MXKeysClaimResponse` represents the response to /keys/claim request made by
  [MXRestClient claimOneTimeKeysForUsersDevices].
@@ -1140,34 +1164,6 @@ FOUNDATION_EXPORT NSString *const kMXPushRuleScopeStringDevice;
      Instead, the corresponding user or device is missing from the one_time_keys result.
      */
     @property (nonatomic) NSDictionary *failures;
-
-@end
-
-#pragma mark - Device Management
-/**
- `MXDevice` represents a device of the current user.
- */
-@interface MXDevice : MXJSONModel
-
-    /**
-     A unique identifier of the device.
-     */
-    @property (nonatomic) NSString *deviceId;
-
-    /**
-     The display name set by the user for this device. Absent if no name has been set.
-     */
-    @property (nonatomic) NSString *displayName;
-
-    /**
-     The IP address where this device was last seen. (May be a few minutes out of date, for efficiency reasons).
-     */
-    @property (nonatomic) NSString *lastSeenIp;
-
-    /**
-     The timestamp (in milliseconds since the unix epoch) when this devices was last seen. (May be a few minutes out of date, for efficiency reasons).
-     */
-    @property (nonatomic) uint64_t lastSeenTs;
 
 @end
 
@@ -1402,32 +1398,27 @@ FOUNDATION_EXPORT NSString *const kMXPushRuleScopeStringDevice;
 
 @end
 
-#pragma mark - Dehydration
+#pragma mark - Device Dehydration
 
-/**
- `MXDehydratedDevice` represents the dehydrated device of the current user.
- */
-@interface MXDehydratedDevice : MXJSONModel
+@interface MXDehydratedDeviceCreationParameters : MXJSONModel
 
-    /**
-     A unique identifier of the device.
-     */
-    @property (nonatomic) NSString *deviceId;
+@property (nonatomic) NSString *body;
 
-    /**
-     The encrypted account data of the dehydrated device (libolm's pickle format)
-     */
-    @property (nonatomic) NSString *account;
+@end
 
-    /**
-     The algorithm used for encrypting the account data
-     */
-    @property (nonatomic) NSString *algorithm;
+@interface MXDehydratedDeviceResponse : MXJSONModel
 
-    /**
-     The passphrase used for encrypting the account data (optional)
-     */
-    @property (nonatomic) NSString *passphrase;
+@property (nonatomic, nonnull) NSString *deviceId;
+
+@property (nonatomic, nonnull) NSDictionary *deviceData;
+
+@end
+
+@interface MXDehydratedDeviceEventsResponse : MXJSONModel
+
+@property (nonatomic) NSArray *events;
+
+@property (nonatomic, nullable) NSString *nextBatch;
 
 @end
 
